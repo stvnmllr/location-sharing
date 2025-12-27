@@ -1,8 +1,3 @@
-// TODO: Implement Express server
-// TODO: Set up Socket.io
-// TODO: Implement session management
-// TODO: Implement location broadcasting
-
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
