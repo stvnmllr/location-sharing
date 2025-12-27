@@ -169,6 +169,8 @@ h1 {
     border-radius: 8px;
     border: 2px solid #ddd;
     z-index: 0; /* Ensure map renders correctly */
+    position: relative; /* Required for Leaflet */
+    background-color: #f0f0f0; /* Show background while tiles load */
 }
 
 .map-controls {

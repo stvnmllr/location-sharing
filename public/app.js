@@ -189,13 +189,19 @@ function joinSession() {
     currentSessionId = sessionId;
     isViewing = true;
     
-    // Initialize map
-    if (!map) {
-        initializeMap();
-    }
-    
+    // Show map container first
     document.getElementById('join-session').classList.add('hidden');
     document.getElementById('map-container').classList.remove('hidden');
+    
+    // Initialize map after container is visible (with small delay to ensure rendering)
+    setTimeout(() => {
+        if (!map) {
+            initializeMap();
+        } else {
+            // If map already exists, invalidate size to fix rendering
+            map.invalidateSize();
+        }
+    }, 100);
 }
 
 // Leave viewing session
@@ -335,14 +341,33 @@ function sendLocationUpdate(position) {
 
 // Initialize Leaflet map
 function initializeMap() {
+    // Check if map container exists and is visible
+    const mapElement = document.getElementById('map');
+    if (!mapElement) {
+        console.error('Map container not found');
+        return;
+    }
+    
     // Default center (San Francisco) - will be updated when location is received
-    map = L.map('map').setView([37.7749, -122.4194], 13);
+    map = L.map('map', {
+        zoomControl: true,
+        attributionControl: true
+    }).setView([37.7749, -122.4194], 13);
     
     // Add OpenStreetMap tiles
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 19
+        maxZoom: 19,
+        tileSize: 256,
+        zoomOffset: 0
     }).addTo(map);
+    
+    // Invalidate size after a brief delay to ensure container is fully rendered
+    setTimeout(() => {
+        if (map) {
+            map.invalidateSize();
+        }
+    }, 200);
     
     console.log('Map initialized');
 }
@@ -353,8 +378,27 @@ function updateMapMarker(location) {
     const lng = location.lng;
     
     if (!map) {
-        initializeMap();
+        // Ensure map container is visible before initializing
+        const mapContainer = document.getElementById('map-container');
+        if (mapContainer.classList.contains('hidden')) {
+            mapContainer.classList.remove('hidden');
+        }
+        setTimeout(() => {
+            initializeMap();
+            addMarkerToMap(lat, lng);
+        }, 100);
+        return;
     }
+    
+    addMarkerToMap(lat, lng);
+    
+    // Update status
+    updateViewStatus('Connected - Location updated');
+}
+
+// Helper function to add/update marker
+function addMarkerToMap(lat, lng) {
+    if (!map) return;
     
     // Remove existing marker if it exists
     if (marker) {
@@ -367,8 +411,8 @@ function updateMapMarker(location) {
     // Center map on marker
     map.setView([lat, lng], map.getZoom() > 15 ? map.getZoom() : 15);
     
-    // Update status
-    updateViewStatus('Connected - Location updated');
+    // Invalidate size to ensure tiles render properly
+    map.invalidateSize();
 }
 
 // Update sharing status text
