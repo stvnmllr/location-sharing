@@ -76,10 +76,10 @@ npm install
 ## Development Roadmap
 
 ### Phase 1: Basic Setup
-- [ ] Initialize frontend and backend projects
-- [ ] Set up development environment
-- [ ] Configure maps library
-- [ ] Create basic UI layout
+- [X] Initialize frontend and backend projects
+- [X] Set up development environment
+- [X] Configure maps library
+- [X] Create basic UI layout
 
 ### Phase 2: Core Functionality
 - [ ] Implement location capture (Geolocation API)
