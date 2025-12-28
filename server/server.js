@@ -15,8 +15,11 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
 // In-memory session storage
-// Structure: Map<sessionId, { sessionId, latestLocation, sharer, viewers, createdAt }>
+// Structure: Map<sessionId, { sessionId, latestLocation, sharer, viewers, createdAt, lastActivity }>
 const sessions = new Map();
+
+// Session timeout: delete sessions after 5 minutes of inactivity (for cleanup)
+const SESSION_TIMEOUT = 10 * 60 * 1000; // 5 minutes
 
 // Generate cryptographically secure random session ID (8 characters, alphanumeric)
 function generateSessionId() {
@@ -53,7 +56,8 @@ io.on('connection', (socket) => {
             latestLocation: null,
             sharer: socket.id,
             viewers: [],
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            lastActivity: Date.now()
         };
         
         sessions.set(sessionId, session);
@@ -67,10 +71,11 @@ io.on('connection', (socket) => {
         socket.emit('session-created', { sessionId: sessionId });
     });
 
-    // Handle session joining (for viewers)
+    // Handle session joining (for viewers) or reconnection (for sharers)
     socket.on('join-session', (data) => {
         const sessionId = (data.sessionId || '').toUpperCase().trim();
-        console.log('Join session requested:', sessionId, 'from:', socket.id);
+        const isReconnect = data.isReconnect || false;
+        console.log('Join session requested:', sessionId, 'from:', socket.id, 'reconnect:', isReconnect);
         
         // Validate session exists
         if (!sessionId || !sessions.has(sessionId)) {
@@ -80,22 +85,39 @@ io.on('connection', (socket) => {
         
         const session = sessions.get(sessionId);
         
-        // Add viewer to session
-        if (!session.viewers.includes(socket.id)) {
-            session.viewers.push(socket.id);
+        if (isReconnect && session.sharer) {
+            // Sharer is reconnecting - update sharer socket ID
+            session.sharer = socket.id;
+            session.lastActivity = Date.now();
+            socket.data.sessionId = sessionId;
+            socket.data.role = 'sharer';
+            
+            socket.emit('session-reconnected', { sessionId: sessionId });
+            console.log('Sharer reconnected to session:', sessionId);
+            
+            // Resume location tracking if location was being shared
+            if (session.latestLocation) {
+                socket.emit('resume-sharing', { sessionId: sessionId });
+            }
+        } else {
+            // Regular viewer joining
+            if (!session.viewers.includes(socket.id)) {
+                session.viewers.push(socket.id);
+            }
+            
+            socket.data.sessionId = sessionId;
+            socket.data.role = 'viewer';
+            
+            // Send current location if available
+            if (session.latestLocation) {
+                socket.emit('location-update', session.latestLocation);
+            }
+            
+            socket.emit('session-joined', { sessionId: sessionId });
+            console.log('Viewer joined session:', sessionId);
         }
         
-        // Store session info on socket for cleanup
-        socket.data.sessionId = sessionId;
-        socket.data.role = 'viewer';
-        
-        // Send current location if available
-        if (session.latestLocation) {
-            socket.emit('location-update', session.latestLocation);
-        }
-        
-        socket.emit('session-joined', { sessionId: sessionId });
-        console.log('Viewer joined session:', sessionId);
+        session.lastActivity = Date.now();
     });
 
     // Handle location updates from sharer
@@ -119,6 +141,7 @@ io.on('connection', (socket) => {
             lng: data.lng,
             timestamp: Date.now()
         };
+        session.lastActivity = Date.now();
         
         console.log('Location update for session:', sessionId, data);
         
@@ -140,9 +163,11 @@ io.on('connection', (socket) => {
         const session = sessions.get(sessionId);
         
         if (socket.data.role === 'sharer') {
-            // If sharer disconnects, remove entire session
-            sessions.delete(sessionId);
-            console.log('Session deleted (sharer disconnected):', sessionId);
+            // Don't delete session immediately - allow reconnection
+            // Just mark that sharer is disconnected, but keep session alive
+            // Session will be cleaned up by timeout if no reconnection
+            console.log('Sharer disconnected from session:', sessionId, '(session kept alive for reconnection)');
+            // Keep session alive - don't delete it
         } else if (socket.data.role === 'viewer') {
             // Remove viewer from session
             session.viewers = session.viewers.filter(id => id !== socket.id);
@@ -150,6 +175,17 @@ io.on('connection', (socket) => {
         }
     });
 });
+
+// Cleanup old sessions periodically
+setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, session] of sessions.entries()) {
+        if (now - session.lastActivity > SESSION_TIMEOUT) {
+            sessions.delete(sessionId);
+            console.log('Session expired and deleted:', sessionId);
+        }
+    }
+}, 60000); // Check every minute
 
 // Start server
 const PORT = process.env.PORT || 3000;
