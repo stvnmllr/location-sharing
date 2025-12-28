@@ -63,25 +63,62 @@ function showView(viewName) {
 
 // Initialize Socket.io connection
 function initializeSocket() {
-    socket = io(SOCKET_URL);
+    // Configure Socket.io for better reconnection
+    socket = io(SOCKET_URL, {
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        reconnectionAttempts: Infinity,
+        timeout: 20000
+    });
     
     socket.on('connect', () => {
         console.log('Connected to server');
+        
+        // Try to reconnect to previous session if we were sharing or viewing
+        const savedSessionId = localStorage.getItem('sessionId');
+        const savedRole = localStorage.getItem('sessionRole');
+        
+        if (savedSessionId && savedRole === 'sharer' && isSharing) {
+            // Reconnect as sharer
+            console.log('Reconnecting as sharer to session:', savedSessionId);
+            socket.emit('join-session', { 
+                sessionId: savedSessionId, 
+                isReconnect: true 
+            });
+        } else if (savedSessionId && savedRole === 'viewer' && isViewing) {
+            // Reconnect as viewer
+            console.log('Reconnecting as viewer to session:', savedSessionId);
+            socket.emit('join-session', { 
+                sessionId: savedSessionId, 
+                isReconnect: false 
+            });
+        }
     });
     
     socket.on('disconnect', () => {
         console.log('Disconnected from server');
         if (isSharing) {
-            updateSharingStatus('Disconnected');
+            updateSharingStatus('Reconnecting...');
         }
         if (isViewing) {
-            updateViewStatus('Disconnected');
+            updateViewStatus('Reconnecting...');
         }
+    });
+    
+    socket.on('reconnect', () => {
+        console.log('Reconnected to server');
+        // Reconnection logic is handled in 'connect' event
     });
     
     // Handle session creation response
     socket.on('session-created', (data) => {
         currentSessionId = data.sessionId;
+        
+        // Save to localStorage for reconnection
+        localStorage.setItem('sessionId', currentSessionId);
+        localStorage.setItem('sessionRole', 'sharer');
+        
         document.getElementById('session-id-display').value = currentSessionId;
         document.getElementById('sharing-info').classList.remove('hidden');
         updateSharingStatus('Sharing...');
@@ -90,9 +127,34 @@ function initializeSocket() {
         startLocationTracking();
     });
     
+    // Handle session reconnection response (for sharer)
+    socket.on('session-reconnected', (data) => {
+        console.log('Reconnected to session:', data.sessionId);
+        currentSessionId = data.sessionId;
+        updateSharingStatus('Sharing...');
+        
+        // Resume location tracking
+        if (!watchId) {
+            startLocationTracking();
+        }
+    });
+    
+    // Handle resume sharing (when reconnected)
+    socket.on('resume-sharing', (data) => {
+        console.log('Resuming sharing for session:', data.sessionId);
+        // Location tracking should already be active, just update status
+        updateSharingStatus('Sharing...');
+    });
+    
     // Handle session joined response
     socket.on('session-joined', (data) => {
         console.log('Joined session:', data.sessionId);
+        currentSessionId = data.sessionId;
+        
+        // Save to localStorage for reconnection
+        localStorage.setItem('sessionId', data.sessionId);
+        localStorage.setItem('sessionRole', 'viewer');
+        
         updateViewStatus('Connected');
     });
     
@@ -155,8 +217,19 @@ function stopSharing() {
         watchId = null;
     }
     
+    // Clear background interval
+    if (backgroundLocationInterval) {
+        clearInterval(backgroundLocationInterval);
+        backgroundLocationInterval = null;
+    }
+    
     isSharing = false;
     currentSessionId = null;
+    lastKnownPosition = null;
+    
+    // Clear saved session
+    localStorage.removeItem('sessionId');
+    localStorage.removeItem('sessionRole');
     
     // Reset UI
     document.getElementById('sharing-info').classList.add('hidden');
@@ -209,6 +282,10 @@ function leaveSession() {
     isViewing = false;
     currentSessionId = null;
     
+    // Clear saved session
+    localStorage.removeItem('sessionId');
+    localStorage.removeItem('sessionRole');
+    
     // Reset UI
     document.getElementById('map-container').classList.add('hidden');
     document.getElementById('join-session').classList.remove('hidden');
@@ -224,6 +301,10 @@ function leaveSession() {
     updateViewStatus('Disconnected');
 }
 
+// Background location tracking state
+let backgroundLocationInterval = null;
+let lastKnownPosition = null;
+
 // Start tracking location (for sharer)
 function startLocationTracking() {
     if (!navigator.geolocation) {
@@ -232,17 +313,18 @@ function startLocationTracking() {
         return;
     }
     
-    // Geolocation options - more forgiving for better compatibility
+    // Geolocation options - optimized for background tracking
     const options = {
-        enableHighAccuracy: false, // Start with false for better compatibility
-        timeout: 10000, // Increase timeout to 10 seconds
-        maximumAge: 30000 // Accept cached location up to 30 seconds old
+        enableHighAccuracy: true, // Better accuracy when available
+        timeout: 15000, // Longer timeout for background scenarios
+        maximumAge: 0 // Always get fresh location
     };
     
     // Get initial location
     navigator.geolocation.getCurrentPosition(
         (position) => {
             console.log('Initial location obtained:', position.coords);
+            lastKnownPosition = position;
             sendLocationUpdate(position);
             updateSharingStatus('Sharing...');
         },
@@ -285,7 +367,14 @@ function startLocationTracking() {
     watchId = navigator.geolocation.watchPosition(
         (position) => {
             console.log('Location update:', position.coords);
+            lastKnownPosition = position;
             sendLocationUpdate(position);
+            
+            // Clear background interval if we got a fresh update
+            if (backgroundLocationInterval) {
+                clearInterval(backgroundLocationInterval);
+                backgroundLocationInterval = null;
+            }
         },
         (error) => {
             console.error('Geolocation watch error:', error);
@@ -307,6 +396,74 @@ function startLocationTracking() {
         },
         options
     );
+    
+    // Set up visibility change listener for background handling
+    setupVisibilityChangeListener();
+}
+
+// Handle page visibility changes (background/foreground)
+function setupVisibilityChangeListener() {
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            // Page went to background
+            console.log('Page went to background - setting up periodic location updates');
+            updateSharingStatus('Sharing (background)...');
+            
+            // Use periodic getCurrentPosition as fallback when watchPosition may be throttled
+            // This helps maintain location updates in background (where supported)
+            if (backgroundLocationInterval) {
+                clearInterval(backgroundLocationInterval);
+            }
+            
+            backgroundLocationInterval = setInterval(() => {
+                if (isSharing && !document.hidden) {
+                    // Page is visible again, stop interval
+                    clearInterval(backgroundLocationInterval);
+                    backgroundLocationInterval = null;
+                    return;
+                }
+                
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        console.log('Background location update:', position.coords);
+                        lastKnownPosition = position;
+                        sendLocationUpdate(position);
+                    },
+                    (error) => {
+                        console.warn('Background location error:', error);
+                        // Don't show errors in background, just log them
+                    },
+                    {
+                        enableHighAccuracy: false, // Use less battery in background
+                        timeout: 10000,
+                        maximumAge: 60000 // Accept cached location up to 1 minute old
+                    }
+                );
+            }, 30000); // Update every 30 seconds in background (where supported)
+        } else {
+            // Page came to foreground
+            console.log('Page came to foreground');
+            updateSharingStatus('Sharing...');
+            
+            // Clear background interval - watchPosition should handle it now
+            if (backgroundLocationInterval) {
+                clearInterval(backgroundLocationInterval);
+                backgroundLocationInterval = null;
+            }
+            
+            // Get fresh location immediately when coming to foreground
+            if (isSharing) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        lastKnownPosition = position;
+                        sendLocationUpdate(position);
+                    },
+                    (error) => console.warn('Foreground location error:', error),
+                    { timeout: 10000, maximumAge: 0 }
+                );
+            }
+        }
+    });
 }
 
 // Get current location
